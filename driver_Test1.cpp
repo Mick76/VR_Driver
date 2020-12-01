@@ -86,7 +86,7 @@ void InitializeDirectX()
 	}
 }
 
-class CVRDisplay : public vr::ITrackedDeviceServerDriver, public vr::IVRVirtualDisplay
+class CVRDisplay : public vr::ITrackedDeviceServerDriver, public vr::IVRDisplayComponent, public vr::IVRVirtualDisplay
 {
 public:
 	CVRDisplay();
@@ -117,6 +117,21 @@ public:
 
 	virtual bool GetTimeSinceLastVsync(float* pfSecondsSinceLastVsync, uint64_t* pulFrameCounter) override;
 
+	//display
+	virtual void GetWindowBounds(int32_t* pnX, int32_t* pnY, uint32_t* pnWidth, uint32_t* pnHeight) override;
+
+	virtual bool IsDisplayOnDesktop() override;
+
+	virtual bool IsDisplayRealDisplay() override;
+
+	virtual void GetRecommendedRenderTargetSize(uint32_t* pnWidth, uint32_t* pnHeight) override;
+
+	virtual void GetEyeOutputViewport(vr::EVREye eEye, uint32_t* pnX, uint32_t* pnY, uint32_t* pnWidth, uint32_t* pnHeight) override;
+
+	virtual void GetProjectionRaw(vr::EVREye eEye, float* pfLeft, float* pfRight, float* pfTop, float* pfBottom) override;
+
+	virtual vr::DistortionCoordinates_t ComputeDistortion(vr::EVREye eEye, float fU, float fV) override;
+
 
 private:
 	uint32_t m_unObjectId;
@@ -125,6 +140,10 @@ private:
 	float m_flAdditionalLatencyInSeconds;
 	std::string m_sSerialNumber;
 	std::string m_sModelNumber;
+
+	int32_t nDisplayWidth;
+	int32_t nDisplayHeight;
+	float m_flIPD;
 
 	string m_hasEnterPresent = "has not entered present"; //to check at the end of the program if it entered the present function
 };
@@ -140,13 +159,15 @@ CVRDisplay::CVRDisplay()
 
 	m_flAdditionalLatencyInSeconds = max( 0.0f, vr::VRSettings()->GetFloat( k_pch_VirtualDisplay_Section, k_pch_VirtualDisplay_AdditionalLatencyInSeconds_Float ) );
 
-	int32_t nDisplayWidth = vr::VRSettings()->GetInt32( k_pch_VirtualDisplay_Section, k_pch_VirtualDisplay_DisplayWidth_Int32 );
-	int32_t nDisplayHeight = vr::VRSettings()->GetInt32( k_pch_VirtualDisplay_Section, k_pch_VirtualDisplay_DisplayHeight_Int32 );
+	nDisplayWidth = vr::VRSettings()->GetInt32( k_pch_VirtualDisplay_Section, k_pch_VirtualDisplay_DisplayWidth_Int32 );
+	nDisplayHeight = vr::VRSettings()->GetInt32( k_pch_VirtualDisplay_Section, k_pch_VirtualDisplay_DisplayHeight_Int32 );
 
 	int32_t nDisplayRefreshRateNumerator = vr::VRSettings()->GetInt32( k_pch_VirtualDisplay_Section, k_pch_VirtualDisplay_DisplayRefreshRateNumerator_Int32 );
 	int32_t nDisplayRefreshRateDenominator = vr::VRSettings()->GetInt32( k_pch_VirtualDisplay_Section, k_pch_VirtualDisplay_DisplayRefreshRateDenominator_Int32 );
 
 	int32_t nAdapterIndex = vr::VRSettings()->GetInt32( k_pch_VirtualDisplay_Section, k_pch_VirtualDisplay_AdapterIndex_Int32 );
+
+	m_flIPD = vr::VRSettings()->GetFloat(vr::k_pch_SteamVR_Section, vr::k_pch_SteamVR_IPD_Float);
 }
 
 CVRDisplay::~CVRDisplay()
@@ -166,8 +187,21 @@ vr::EVRInitError CVRDisplay::Activate(uint32_t unObjectId)
 
 	vr::PropertyContainerHandle_t ulContainer = vr::VRProperties()->TrackedDeviceToPropertyContainer(unObjectId);
 
-	vr::VRProperties()->SetStringProperty(ulContainer, vr::Prop_ModelNumber_String, m_rchModelNumber);
+	vr::VRProperties()->SetStringProperty(ulContainer, vr::Prop_ModelNumber_String, m_sModelNumber.c_str());
+	vr::VRProperties()->SetStringProperty(ulContainer, vr::Prop_RenderModelName_String, m_sModelNumber.c_str());
+
+	vr::VRProperties()->SetFloatProperty(ulContainer, vr::Prop_UserIpdMeters_Float, m_flIPD);
+	vr::VRProperties()->SetFloatProperty(ulContainer, vr::Prop_UserHeadToEyeDepthMeters_Float, 0.f);
+	vr::VRProperties()->SetFloatProperty(ulContainer, vr::Prop_DisplayFrequency_Float, 0);
 	vr::VRProperties()->SetFloatProperty(ulContainer, vr::Prop_SecondsFromVsyncToPhotons_Float, m_flAdditionalLatencyInSeconds);
+
+	// return a constant that's not 0 (invalid) or 1 (reserved for Oculus)
+	vr::VRProperties()->SetUint64Property(ulContainer, vr::Prop_CurrentUniverseId_Uint64, 2);
+	vr::VRProperties()->SetBoolProperty(ulContainer, vr::Prop_IsOnDesktop_Bool, false);
+
+	vr::VRProperties()->SetUint64Property(ulContainer, vr::Prop_GraphicsAdapterLuid_Uint64, 0);
+
+
 	return vr::VRInitError_None;
 }
 
@@ -195,6 +229,16 @@ void* CVRDisplay::GetComponent(const char* pchComponentNameAndVersion)
 		myfile << "\n";
 		myfile.close();
 		return static_cast<vr::IVRVirtualDisplay*>(this);
+	}
+	else if (!_stricmp(pchComponentNameAndVersion, vr::IVRDisplayComponent_Version))
+	{
+		ofstream myfile;
+		myfile.open("C:\\Users\\bluem\\Desktop\\LogFoundComponent.txt", std::ofstream::app);
+		myfile << "Found the component: ";
+		myfile << pchComponentNameAndVersion;
+		myfile << "\n";
+		myfile.close();
+		return static_cast<vr::IVRDisplayComponent*>(this);
 	}
 	ofstream myfile;
 	myfile.open("C:\\Users\\bluem\\Desktop\\LogFoundComponent.txt", std::ofstream::app);
@@ -249,12 +293,76 @@ void CVRDisplay::Present(const vr::PresentInfo_t* pPresentInfo, uint32_t unPrese
 
 void CVRDisplay::WaitForPresent()
 {
+	m_hasEnterPresent = "Enter present"; //log this string on Deactivate()
 
 }
 
 bool CVRDisplay::GetTimeSinceLastVsync(float* pfSecondsSinceLastVsync, uint64_t* pulFrameCounter)
 {
+	m_hasEnterPresent = "Enter present"; //log this string on Deactivate()
+
 	return true;
+}
+
+//display
+void CVRDisplay::GetWindowBounds(int32_t* pnX, int32_t* pnY, uint32_t* pnWidth, uint32_t* pnHeight)
+{
+	*pnX = 20;
+	*pnY = 20;
+	*pnWidth = nDisplayWidth;
+	*pnHeight = nDisplayHeight;
+}
+
+bool CVRDisplay::IsDisplayOnDesktop()
+{
+	return true;
+}
+
+bool CVRDisplay::IsDisplayRealDisplay()
+{
+	return false;
+}
+
+void CVRDisplay::GetRecommendedRenderTargetSize(uint32_t* pnWidth, uint32_t* pnHeight)
+{
+	*pnWidth = nDisplayWidth*0.5f;
+	*pnHeight = nDisplayHeight*0.5f;
+}
+
+void CVRDisplay::GetEyeOutputViewport(vr::EVREye eEye, uint32_t* pnX, uint32_t* pnY, uint32_t* pnWidth, uint32_t* pnHeight)
+{
+	*pnY = 0;
+	*pnWidth = nDisplayWidth / 2;
+	*pnHeight = nDisplayHeight;
+
+	if (eEye == vr::Eye_Left)
+	{
+		*pnX = 0;
+	}
+	else
+	{
+		*pnX = nDisplayWidth / 2;
+	}
+}
+
+void CVRDisplay::GetProjectionRaw(vr::EVREye eEye, float* pfLeft, float* pfRight, float* pfTop, float* pfBottom)
+{
+	*pfLeft = -1.0;
+	*pfRight = 1.0;
+	*pfTop = -1.0;
+	*pfBottom = 1.0;
+}
+
+vr::DistortionCoordinates_t CVRDisplay::ComputeDistortion(vr::EVREye eEye, float fU, float fV)
+{
+	vr::DistortionCoordinates_t coordinates;
+	coordinates.rfBlue[0] = fU;
+	coordinates.rfBlue[1] = fV;
+	coordinates.rfGreen[0] = fU;
+	coordinates.rfGreen[1] = fV;
+	coordinates.rfRed[0] = fU;
+	coordinates.rfRed[1] = fV;
+	return coordinates;
 }
 
 
